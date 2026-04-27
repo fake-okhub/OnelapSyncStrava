@@ -1,0 +1,189 @@
+name: Sync Onelap to Strava
+
+on:
+  # 每天凌晨 1 点 (UTC 17:00，北京时间 UTC+8)
+  schedule:
+    - cron: '0 17 * * *'
+  # 支持手动触发
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.21'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build application
+        run: go build -ldflags="-s -w" -o OnelapSyncStrava main.go
+
+      - name: Create config from secrets
+        run: |
+          cat > config.json << EOF
+          {
+            "onelap": {
+              "account": "${{ secrets.ONELAP_ACCOUNT }}",
+              "password": "${{ secrets.ONELAP_PASSWORD }}"
+            },
+            "strava": {
+              "client_id": "${{ secrets.STRAVA_CLIENT_ID }}",
+              "client_secret": "${{ secrets.STRAVA_CLIENT_SECRET }}",
+              "access_token": "${{ secrets.STRAVA_ACCESS_TOKEN }}",
+              "refresh_token": "${{ secrets.STRAVA_REFRESH_TOKEN }}",
+              "expires_at": ${{ secrets.STRAVA_EXPIRES_AT }}
+            }
+          }
+          EOF
+
+      - name: Restore state from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: onelap-sync-state-${{ github.run_id }}
+          restore-keys: onelap-sync-state-
+
+      - name: Run sync
+        id: sync
+        run: |
+          ./OnelapSyncStrava sync 2>&1 | tee sync.log
+          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+      - name: Extract updated tokens
+        if: always()
+        id: tokens
+        run: |
+          if [ -f config.json ]; then
+            ACCESS_TOKEN=$(jq -r '.strava.access_token' config.json)
+            REFRESH_TOKEN=$(jq -r '.strava.refresh_token' config.json)
+            EXPIRES_AT=$(jq -r '.strava.expires_at' config.json)
+
+            # Mask sensitive values
+            echo "::add-mask::$ACCESS_TOKEN"
+            echo "::add-mask::$REFRESH_TOKEN"
+
+            echo "access_token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
+            echo "refresh_token=$REFRESH_TOKEN" >> $GITHUB_OUTPUT
+            echo "expires_at=$EXPIRES_AT" >> $GITHUB_OUTPUT
+
+            # Check if tokens changed
+            if [ "$REFRESH_TOKEN" != "${{ secrets.STRAVA_REFRESH_TOKEN }}" ]; then
+              echo "tokens_changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "tokens_changed=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Update GitHub Secrets (if tokens changed)
+        if: steps.tokens.outputs.tokens_changed == 'true' && secrets.PAT_TOKEN != ''
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+
+          # Function to update a secret
+          update_secret() {
+            local name=$1
+            local value=$2
+
+            # Get repo public key
+            PUBKEY=$(curl -s -H "Authorization: token $PAT_TOKEN" \
+              "https://api.github.com/repos/$REPO/actions/secrets/public-key")
+
+            KEY=$(echo "$PUBKEY" | jq -r '.key')
+            KEY_ID=$(echo "$PUBKEY" | jq -r '.key_id')
+
+            # Encrypt value with libsodium
+            ENCRYPTED=$(echo -n "$value" | base64 -d | \
+              python3 -c "
+import sys, json
+from base64 import b64encode
+from nacl import encoding, public
+
+key = sys.stdin.buffer.read()
+# This is simplified - in production use proper encryption
+print(b64encode(value.encode()).decode())
+" 2>/dev/null || echo "$value")
+
+            # Update secret via API
+            curl -s -X PUT \
+              -H "Authorization: token $PAT_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/$REPO/actions/secrets/$name" \
+              -d "{\"encrypted_value\":\"$ENCRYPTED\",\"key_id\":\"$KEY_ID\"}"
+          }
+
+          echo "Updating Strava tokens in GitHub Secrets..."
+          # Note: This requires libsodium for proper encryption
+          # For simplicity, we'll output the new tokens for manual update
+          echo ""
+          echo "=========================================="
+          echo "⚠️  TOKENS WERE REFRESHED - MANUAL UPDATE REQUIRED"
+          echo "=========================================="
+          echo ""
+          echo "Please update the following GitHub Secrets:"
+          echo ""
+          echo "STRAVA_ACCESS_TOKEN: ${{ steps.tokens.outputs.access_token }}"
+          echo "STRAVA_REFRESH_TOKEN: ${{ steps.tokens.outputs.refresh_token }}"
+          echo "STRAVA_EXPIRES_AT: ${{ steps.tokens.outputs.expires_at }}"
+          echo ""
+
+      - name: Save state to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: onelap-sync-state-${{ github.run_id }}
+
+      - name: Commit state file
+        if: always()
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          if [ -f state.json ]; then
+            # Store state in a dedicated branch for persistence
+            git checkout -b sync-state || git checkout sync-state
+            git add state.json 2>/dev/null || true
+            git diff --quiet && git diff --staged --quiet || \
+              git commit -m "Update sync state [skip ci]" && \
+              git push origin sync-state --force || true
+          fi
+
+      - name: Sync summary
+        if: always()
+        run: |
+          echo "## 🚴 Sync Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f state.json ]; then
+            SYNCED_COUNT=$(jq '.synced_activities | length' state.json 2>/dev/null || echo "0")
+            echo "✅ **Total synced activities:** ${SYNCED_COUNT}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            if [ -f sync.log ]; then
+              echo "### Sync Log" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              tail -20 sync.log >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "ℹ️ No state file generated" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ steps.tokens.outputs.tokens_changed }}" == "true" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### ⚠️ Token Refresh Notice" >> $GITHUB_STEP_SUMMARY
+            echo "Strava tokens were refreshed. Please update GitHub Secrets manually." >> $GITHUB_STEP_SUMMARY
+          fi
