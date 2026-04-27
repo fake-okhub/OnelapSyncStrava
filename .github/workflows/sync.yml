@@ -85,60 +85,6 @@ jobs:
             fi
           fi
 
-      - name: Update GitHub Secrets (if tokens changed)
-        if: steps.tokens.outputs.tokens_changed == 'true' && secrets.PAT_TOKEN != ''
-        env:
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          REPO="${{ github.repository }}"
-
-          # Function to update a secret
-          update_secret() {
-            local name=$1
-            local value=$2
-
-            # Get repo public key
-            PUBKEY=$(curl -s -H "Authorization: token $PAT_TOKEN" \
-              "https://api.github.com/repos/$REPO/actions/secrets/public-key")
-
-            KEY=$(echo "$PUBKEY" | jq -r '.key')
-            KEY_ID=$(echo "$PUBKEY" | jq -r '.key_id')
-
-            # Encrypt value with libsodium
-            ENCRYPTED=$(echo -n "$value" | base64 -d | \
-              python3 -c "
-import sys, json
-from base64 import b64encode
-from nacl import encoding, public
-
-key = sys.stdin.buffer.read()
-# This is simplified - in production use proper encryption
-print(b64encode(value.encode()).decode())
-" 2>/dev/null || echo "$value")
-
-            # Update secret via API
-            curl -s -X PUT \
-              -H "Authorization: token $PAT_TOKEN" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/$REPO/actions/secrets/$name" \
-              -d "{\"encrypted_value\":\"$ENCRYPTED\",\"key_id\":\"$KEY_ID\"}"
-          }
-
-          echo "Updating Strava tokens in GitHub Secrets..."
-          # Note: This requires libsodium for proper encryption
-          # For simplicity, we'll output the new tokens for manual update
-          echo ""
-          echo "=========================================="
-          echo "⚠️  TOKENS WERE REFRESHED - MANUAL UPDATE REQUIRED"
-          echo "=========================================="
-          echo ""
-          echo "Please update the following GitHub Secrets:"
-          echo ""
-          echo "STRAVA_ACCESS_TOKEN: ${{ steps.tokens.outputs.access_token }}"
-          echo "STRAVA_REFRESH_TOKEN: ${{ steps.tokens.outputs.refresh_token }}"
-          echo "STRAVA_EXPIRES_AT: ${{ steps.tokens.outputs.expires_at }}"
-          echo ""
-
       - name: Save state to cache
         if: always()
         uses: actions/cache/save@v4
@@ -153,7 +99,6 @@ print(b64encode(value.encode()).decode())
           git config --local user.name "github-actions[bot]"
 
           if [ -f state.json ]; then
-            # Store state in a dedicated branch for persistence
             git checkout -b sync-state || git checkout sync-state
             git add state.json 2>/dev/null || true
             git diff --quiet && git diff --staged --quiet || \
@@ -185,5 +130,10 @@ print(b64encode(value.encode()).decode())
           if [ "${{ steps.tokens.outputs.tokens_changed }}" == "true" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### ⚠️ Token Refresh Notice" >> $GITHUB_STEP_SUMMARY
-            echo "Strava tokens were refreshed. Please update GitHub Secrets manually." >> $GITHUB_STEP_SUMMARY
+            echo "Strava tokens were refreshed. New tokens:" >> $GITHUB_STEP_SUMMARY
+            echo "- ACCESS_TOKEN: \`${{ steps.tokens.outputs.access_token }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- REFRESH_TOKEN: \`${{ steps.tokens.outputs.refresh_token }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- EXPIRES_AT: \`${{ steps.tokens.outputs.expires_at }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please update these values in GitHub Secrets." >> $GITHUB_STEP_SUMMARY
           fi
