@@ -177,6 +177,7 @@ func runDownloadAll() {
 		delayBetweenDownloads = 2 * time.Second  // Delay between each download
 		delayBetweenBatches   = 10 * time.Second // Delay every 10 files
 		batchSize             = 10
+		maxDownloads          = 2 // Test mode: only download 2 files, set to 0 for unlimited
 	)
 
 	onelapClient := onelap.NewClient()
@@ -195,6 +196,12 @@ func runDownloadAll() {
 	}
 
 	log.Printf("Found %d total activities.", len(activities))
+
+	// Test mode: limit downloads
+	if maxDownloads > 0 && len(activities) > maxDownloads {
+		log.Printf("TEST MODE: Only processing first %d activities.", maxDownloads)
+		activities = activities[:maxDownloads]
+	}
 
 	// 3. Create output directory
 	outputDir := "fit_downloads"
