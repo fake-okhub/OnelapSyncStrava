@@ -172,9 +172,19 @@ func (c *Client) GetTodayActivities() ([]Activity, error) {
 }
 
 func (c *Client) DownloadFIT(durl, destPath string) error {
+	// Handle relative URLs - prepend base URL if needed
+	fullURL := durl
+	if len(durl) > 0 && durl[0] == '/' {
+		// Relative URL, prepend the analysis base URL
+		fullURL = AnalysisBaseURL + durl
+	}
+
 	resp, err := c.restyClient.R().
 		SetOutput(destPath).
-		Get(durl)
+		SetCookie(&http.Cookie{Name: "ouid", Value: c.UID}).
+		SetCookie(&http.Cookie{Name: "XSRF-TOKEN", Value: c.XSRFToken}).
+		SetCookie(&http.Cookie{Name: "OTOKEN", Value: c.OToken}).
+		Get(fullURL)
 
 	if err != nil {
 		return fmt.Errorf("failed to download FIT file: %w", err)
