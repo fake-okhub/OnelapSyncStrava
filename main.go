@@ -154,8 +154,8 @@ func runSync() {
 		}
 
 		log.Printf("Uploading to Strava...")
-		// Generate activity name: "骑行 - 2026-04-26 15:39"
-		activityName := fmt.Sprintf("骑行 - %s", act.StartTime)
+		// Generate activity name: "OneLap Bike - 2026-04-26 15:39"
+		activityName := fmt.Sprintf("OneLap Bike - %s", act.StartTime)
 		if err := stravaClient.UploadActivity(fitPath, idStr, activityName); err != nil {
 			log.Printf("Error uploading to Strava: %v", err)
 		} else {
