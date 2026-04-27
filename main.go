@@ -41,6 +41,8 @@ func main() {
 		runStatus()
 	case "sync":
 		runSync()
+	case "sync-all":
+		runSyncAll()
 	case "download-all":
 		runDownloadAll()
 	case "help", "-h", "--help":
@@ -59,6 +61,7 @@ func printHelp() {
 	fmt.Println("  OnelapSyncStrava [command]")
 	fmt.Println("\nAvailable Commands:")
 	fmt.Println("  sync          (default) Fetch today's activities and upload to Strava")
+	fmt.Println("  sync-all      Sync ALL historical activities to Strava (with rate limiting)")
 	fmt.Println("  download-all  Download ALL FIT files from Onelap (with rate limiting)")
 	fmt.Println("  auth          Run Strava OAuth flow to get access tokens")
 	fmt.Println("  check         Verify credentials and connectivity")
@@ -171,6 +174,137 @@ func runSync() {
 		}
 	}
 	log.Printf("Sync complete. %d new activities synced.", syncedCount)
+}
+
+// runSyncAll syncs ALL historical activities to Strava with proper rate limiting
+// Strava API limits: 200 requests per 15 minutes, 2000 per day
+func runSyncAll() {
+	// Rate limiting configuration for Strava API
+	const (
+		maxRequestsPerWindow = 180                    // Leave buffer below 200 limit
+		windowDuration       = 15 * time.Minute       // 15 minute window
+		delayBetweenUploads  = 500 * time.Millisecond // Small delay between uploads
+	)
+
+	onelapClient := onelap.NewClient()
+	stravaClient := strava.NewClient()
+
+	// 1. Login to Onelap
+	log.Println("Logging in to Onelap...")
+	if err := onelapClient.Login(config.GlobalConfig.Onelap.Account, config.GlobalConfig.Onelap.Password); err != nil {
+		log.Fatalf("Onelap login error: %v", err)
+	}
+
+	// 2. Get ALL activities
+	log.Println("Fetching ALL activities from Onelap...")
+	activities, err := onelapClient.GetActivities()
+	if err != nil {
+		log.Fatalf("Error getting activities: %v", err)
+	}
+
+	log.Printf("Found %d total activities.", len(activities))
+
+	// 3. Filter out already synced activities
+	var toSync []onelap.Activity
+	for _, act := range activities {
+		if !config.IsSynced(act.ExternalID) {
+			toSync = append(toSync, act)
+		}
+	}
+
+	if len(toSync) == 0 {
+		log.Println("All activities already synced!")
+		return
+	}
+
+	log.Printf("%d activities need to be synced.", len(toSync))
+
+	// 4. Calculate batches needed
+	batches := (len(toSync) + maxRequestsPerWindow - 1) / maxRequestsPerWindow
+	log.Printf("Will process in %d batch(es) due to Strava rate limits.", batches)
+
+	// 5. Create temp directory for FIT files
+	tmpDir := "tmp"
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		log.Fatalf("Error creating tmp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// 6. Process activities in batches
+	syncedCount := 0
+	failedCount := 0
+	requestsInWindow := 0
+
+	for i, act := range toSync {
+		idStr := act.ExternalID
+
+		// Check if we need to wait for rate limit
+		if requestsInWindow >= maxRequestsPerWindow {
+			log.Printf("Rate limit reached (%d requests). Waiting 15 minutes...", requestsInWindow)
+			log.Printf("Progress: %d/%d synced", syncedCount, len(toSync))
+			time.Sleep(windowDuration)
+			requestsInWindow = 0
+
+			// Refresh token after waiting
+			log.Println("Refreshing Strava token...")
+			if err := stravaClient.RefreshToken(configPath); err != nil {
+				log.Fatalf("Strava token refresh error: %v", err)
+			}
+		}
+
+		// Refresh token on first upload
+		if syncedCount == 0 && requestsInWindow == 0 {
+			log.Println("Refreshing Strava token...")
+			if err := stravaClient.RefreshToken(configPath); err != nil {
+				log.Fatalf("Strava token refresh error: %v", err)
+			}
+			requestsInWindow++ // Token refresh counts as a request
+		}
+
+		log.Printf("[%d/%d] Processing activity: %s (%s)", i+1, len(toSync), idStr, act.StartTime)
+
+		// Download FIT file
+		fitPath := filepath.Join(tmpDir, fmt.Sprintf("%s.fit", idStr))
+		if err := onelapClient.DownloadActivityFIT(&act, fitPath); err != nil {
+			log.Printf("Error downloading FIT for activity %s: %v", idStr, err)
+			failedCount++
+			continue
+		}
+
+		// Upload to Strava
+		activityName := fmt.Sprintf("OneLap Bike - %s", act.StartTime)
+		if err := stravaClient.UploadActivity(fitPath, idStr, activityName); err != nil {
+			log.Printf("Error uploading to Strava: %v", err)
+			failedCount++
+		} else {
+			log.Printf("Successfully synced activity %s", idStr)
+			config.AddSyncedID(idStr)
+			syncedCount++
+			requestsInWindow++
+
+			// Save state every 10 activities
+			if syncedCount%10 == 0 {
+				if err := config.SaveState(statePath); err != nil {
+					log.Printf("Warning: failed to save state: %v", err)
+				}
+			}
+		}
+
+		// Small delay between uploads
+		time.Sleep(delayBetweenUploads)
+	}
+
+	// Final state save
+	if syncedCount > 0 {
+		if err := config.SaveState(statePath); err != nil {
+			log.Printf("Warning: failed to save state: %v", err)
+		}
+	}
+
+	log.Printf("Sync-all complete!")
+	log.Printf("  Synced: %d", syncedCount)
+	log.Printf("  Failed: %d", failedCount)
+	log.Printf("  Total activities now in state: %d", len(config.GlobalState.SyncedIDs))
 }
 
 func runDownloadAll() {
