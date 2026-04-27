@@ -118,23 +118,19 @@ func (c *Client) Check(account, password string) error {
 type Activity struct {
 	ExternalID string      `json:"_id"` // Unique activity ID from Onelap
 	UserID     json.Number `json:"id"`  // User ID
-	FileKey    string      `json:"fileKey"`
-	StartTime  string      `json:"date"` // Use 'date' field from API
-	DURL       string      `json:"durl"`
+	FitURL     string      `json:"fitUrl"` // FIT file name (e.g., MATCH_120031-2026-04-26-15-39-00-log.st)
+	StartTime  string      `json:"date"`   // Use 'date' field from API
+	DURL       string      `json:"durl"`   // Download URL (base64 encoded, relative path)
 }
 
 // GetDownloadURL returns the URL to download the FIT file
 func (a *Activity) GetDownloadURL() string {
-	// Try fileKey first (base64 encoded filename)
-	if a.FileKey != "" {
-		return AnalysisBaseURL + "/download/" + a.FileKey
-	}
-	// Fall back to durl
+	// durl is already the correct relative path (base64 encoded)
 	if a.DURL != "" {
 		if len(a.DURL) > 0 && a.DURL[0] == '/' {
-			return AnalysisBaseURL + a.DURL
+			return "https://u.onelap.cn" + a.DURL
 		}
-		return a.DURL
+		return "https://u.onelap.cn/analysis/download/" + a.DURL
 	}
 	return ""
 }
