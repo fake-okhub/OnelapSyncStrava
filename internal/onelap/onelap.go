@@ -123,6 +123,22 @@ type Activity struct {
 	DURL       string      `json:"durl"`
 }
 
+// GetDownloadURL returns the URL to download the FIT file
+func (a *Activity) GetDownloadURL() string {
+	// Try fileKey first (base64 encoded filename)
+	if a.FileKey != "" {
+		return AnalysisBaseURL + "/download/" + a.FileKey
+	}
+	// Fall back to durl
+	if a.DURL != "" {
+		if len(a.DURL) > 0 && a.DURL[0] == '/' {
+			return AnalysisBaseURL + a.DURL
+		}
+		return a.DURL
+	}
+	return ""
+}
+
 func (c *Client) GetActivities() ([]Activity, error) {
 	resp, err := c.restyClient.R().
 		SetCookie(&http.Cookie{Name: "ouid", Value: c.UID}).
@@ -192,6 +208,31 @@ func (c *Client) DownloadFIT(durl, destPath string) error {
 
 	if resp.StatusCode() != http.StatusOK {
 		return fmt.Errorf("download failed with status: %s", resp.Status())
+	}
+
+	return nil
+}
+
+// DownloadActivityFIT downloads the FIT file for an activity using its FileKey or DURL
+func (c *Client) DownloadActivityFIT(act *Activity, destPath string) error {
+	downloadURL := act.GetDownloadURL()
+	if downloadURL == "" {
+		return fmt.Errorf("no download URL available for activity %s", act.ExternalID)
+	}
+
+	resp, err := c.restyClient.R().
+		SetOutput(destPath).
+		SetCookie(&http.Cookie{Name: "ouid", Value: c.UID}).
+		SetCookie(&http.Cookie{Name: "XSRF-TOKEN", Value: c.XSRFToken}).
+		SetCookie(&http.Cookie{Name: "OTOKEN", Value: c.OToken}).
+		Get(downloadURL)
+
+	if err != nil {
+		return fmt.Errorf("failed to download FIT file: %w", err)
+	}
+
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("download failed with status: %s, url: %s", resp.Status(), downloadURL)
 	}
 
 	return nil

@@ -144,7 +144,7 @@ func runSync() {
 
 		fitPath := filepath.Join(tmpDir, fmt.Sprintf("%s.fit", idStr))
 		log.Printf("Downloading FIT file...")
-		if err := onelapClient.DownloadFIT(act.DURL, fitPath); err != nil {
+		if err := onelapClient.DownloadActivityFIT(&act, fitPath); err != nil {
 			log.Printf("Error downloading FIT for activity %s: %v", idStr, err)
 			continue
 		}
