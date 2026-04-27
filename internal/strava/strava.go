@@ -84,15 +84,22 @@ func (c *Client) Check(configPath string) error {
 	return c.RefreshToken(configPath)
 }
 
-func (c *Client) UploadActivity(filePath, externalID string) error {
+func (c *Client) UploadActivity(filePath, externalID, activityName string) error {
 	cfg := &config.GlobalConfig.Strava
+
+	// Build form data with activity name
+	formData := map[string]string{
+		"data_type":   "fit",
+		"external_id": externalID,
+	}
+	if activityName != "" {
+		formData["name"] = activityName
+	}
+
 	resp, err := c.restyClient.R().
 		SetHeader("Authorization", "Bearer "+cfg.AccessToken).
 		SetFile("file", filePath).
-		SetFormData(map[string]string{
-			"data_type":   "fit",
-			"external_id": externalID,
-		}).
+		SetFormData(formData).
 		Post(StravaBaseURL + "/uploads")
 
 	if err != nil {
