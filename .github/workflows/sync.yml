@@ -96,6 +96,20 @@ jobs:
             fi
           fi
 
+      - name: Update GitHub Secrets
+        if: steps.tokens.outputs.tokens_changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          echo "Updating Strava tokens in GitHub Secrets..."
+
+          # Use GitHub CLI to update secrets
+          echo "${{ steps.tokens.outputs.access_token }}" | gh secret set STRAVA_ACCESS_TOKEN
+          echo "${{ steps.tokens.outputs.refresh_token }}" | gh secret set STRAVA_REFRESH_TOKEN
+          echo "${{ steps.tokens.outputs.expires_at }}" | gh secret set STRAVA_EXPIRES_AT
+
+          echo "✅ Secrets updated successfully!"
+
       - name: Save state to cache
         if: always()
         uses: actions/cache/save@v4
@@ -153,11 +167,6 @@ jobs:
 
           if [ "${{ steps.tokens.outputs.tokens_changed }}" == "true" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### ⚠️ Token Refresh Notice" >> $GITHUB_STEP_SUMMARY
-            echo "Strava tokens were refreshed. New tokens:" >> $GITHUB_STEP_SUMMARY
-            echo "- ACCESS_TOKEN: \`${{ steps.tokens.outputs.access_token }}\`" >> $GITHUB_STEP_SUMMARY
-            echo "- REFRESH_TOKEN: \`${{ steps.tokens.outputs.refresh_token }}\`" >> $GITHUB_STEP_SUMMARY
-            echo "- EXPIRES_AT: \`${{ steps.tokens.outputs.expires_at }}\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Please update these values in GitHub Secrets." >> $GITHUB_STEP_SUMMARY
+            echo "### 🔄 Token Auto-Updated" >> $GITHUB_STEP_SUMMARY
+            echo "Strava tokens were refreshed and GitHub Secrets updated automatically." >> $GITHUB_STEP_SUMMARY
           fi
