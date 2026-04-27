@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"OnelapSyncStrava/internal/config"
 	"OnelapSyncStrava/internal/onelap"
@@ -40,6 +41,8 @@ func main() {
 		runStatus()
 	case "sync":
 		runSync()
+	case "download-all":
+		runDownloadAll()
 	case "help", "-h", "--help":
 		printHelp()
 	default:
@@ -55,10 +58,11 @@ func printHelp() {
 	fmt.Println("Usage:")
 	fmt.Println("  OnelapSyncStrava [command]")
 	fmt.Println("\nAvailable Commands:")
-	fmt.Println("  sync    (default) Fetch today's activities and upload to Strava")
-	fmt.Println("  auth    Run Strava OAuth flow to get access tokens")
-	fmt.Println("  check   Verify credentials and connectivity")
-	fmt.Println("  status  Show current configuration and sync status")
+	fmt.Println("  sync          (default) Fetch today's activities and upload to Strava")
+	fmt.Println("  download-all  Download ALL FIT files from Onelap (with rate limiting)")
+	fmt.Println("  auth          Run Strava OAuth flow to get access tokens")
+	fmt.Println("  check         Verify credentials and connectivity")
+	fmt.Println("  status        Show current configuration and sync status")
 }
 
 func runCheck() {
@@ -83,13 +87,13 @@ func runStatus() {
 	fmt.Println("--- Configuration Status ---")
 	fmt.Printf("Onelap Account:  %s\n", config.GlobalConfig.Onelap.Account)
 	fmt.Printf("Strava ClientID: %s\n", config.GlobalConfig.Strava.ClientID)
-	
+
 	hasToken := "No"
 	if config.GlobalConfig.Strava.RefreshToken != "" {
 		hasToken = "Yes"
 	}
 	fmt.Printf("Strava Authed:   %s\n", hasToken)
-	
+
 	fmt.Printf("\n--- Sync Status ---\n")
 	fmt.Printf("Synced Activities: %d\n", len(config.GlobalState.SyncedIDs))
 }
@@ -134,7 +138,7 @@ func runSync() {
 	syncedCount := 0
 	for _, act := range activities {
 		idStr := act.ExternalID
-		
+
 		if config.IsSynced(idStr) {
 			log.Printf("Activity %s already synced, skipping.", idStr)
 			continue
@@ -165,4 +169,79 @@ func runSync() {
 		}
 	}
 	log.Printf("Sync complete. %d new activities synced.", syncedCount)
+}
+
+func runDownloadAll() {
+	// Safety: rate limiting configuration
+	const (
+		delayBetweenDownloads = 2 * time.Second  // Delay between each download
+		delayBetweenBatches   = 10 * time.Second // Delay every 10 files
+		batchSize             = 10
+	)
+
+	onelapClient := onelap.NewClient()
+
+	// 1. Login to Onelap
+	log.Println("Logging in to Onelap...")
+	if err := onelapClient.Login(config.GlobalConfig.Onelap.Account, config.GlobalConfig.Onelap.Password); err != nil {
+		log.Fatalf("Onelap login error: %v", err)
+	}
+
+	// 2. Get ALL activities
+	log.Println("Fetching ALL activities from Onelap...")
+	activities, err := onelapClient.GetActivities()
+	if err != nil {
+		log.Fatalf("Error getting activities: %v", err)
+	}
+
+	log.Printf("Found %d total activities.", len(activities))
+
+	// 3. Create output directory
+	outputDir := "fit_downloads"
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		log.Fatalf("Error creating output dir: %v", err)
+	}
+
+	// 4. Download all FIT files
+	downloadedCount := 0
+	skippedCount := 0
+	failedCount := 0
+
+	for i, act := range activities {
+		idStr := act.ExternalID
+
+		// Check if already downloaded
+		fitPath := filepath.Join(outputDir, fmt.Sprintf("%s.fit", idStr))
+		if _, err := os.Stat(fitPath); err == nil {
+			log.Printf("[%d/%d] Activity %s already downloaded, skipping.", i+1, len(activities), idStr)
+			skippedCount++
+			continue
+		}
+
+		log.Printf("[%d/%d] Downloading activity: %s (%s)", i+1, len(activities), idStr, act.StartTime)
+
+		if err := onelapClient.DownloadActivityFIT(&act, fitPath); err != nil {
+			log.Printf("Error downloading FIT for activity %s: %v", idStr, err)
+			failedCount++
+			continue
+		}
+
+		downloadedCount++
+		log.Printf("Successfully downloaded: %s", fitPath)
+
+		// Rate limiting: delay between downloads
+		time.Sleep(delayBetweenDownloads)
+
+		// Extra delay every batch
+		if (i+1)%batchSize == 0 {
+			log.Printf("Batch complete, pausing for %v to avoid rate limiting...", delayBetweenBatches)
+			time.Sleep(delayBetweenBatches)
+		}
+	}
+
+	log.Printf("Download complete.")
+	log.Printf("  Downloaded: %d", downloadedCount)
+	log.Printf("  Skipped (already exists): %d", skippedCount)
+	log.Printf("  Failed: %d", failedCount)
+	log.Printf("  Output directory: %s", outputDir)
 }

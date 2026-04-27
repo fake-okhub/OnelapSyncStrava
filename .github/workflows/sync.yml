@@ -6,6 +6,15 @@ on:
     - cron: '0 17 * * *'
   # 支持手动触发
   workflow_dispatch:
+    inputs:
+      mode:
+        description: '运行模式'
+        required: true
+        default: 'sync'
+        type: choice
+        options:
+          - sync
+          - download-all
 
 env:
   GO_VERSION: '1.21'
@@ -57,7 +66,9 @@ jobs:
       - name: Run sync
         id: sync
         run: |
-          ./OnelapSyncStrava sync 2>&1 | tee sync.log
+          MODE="${{ github.event.inputs.mode || 'sync' }}"
+          echo "Running mode: $MODE"
+          ./OnelapSyncStrava $MODE 2>&1 | tee sync.log
           echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
 
       - name: Extract updated tokens
@@ -92,6 +103,14 @@ jobs:
           path: state.json
           key: onelap-sync-state-${{ github.run_id }}
 
+      - name: Upload FIT files (download-all mode)
+        if: github.event.inputs.mode == 'download-all'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fit-files
+          path: fit_downloads/
+          retention-days: 7
+
       - name: Commit state file
         if: always()
         run: |
@@ -109,22 +128,27 @@ jobs:
       - name: Sync summary
         if: always()
         run: |
-          echo "## 🚴 Sync Summary" >> $GITHUB_STEP_SUMMARY
+          MODE="${{ github.event.inputs.mode || 'sync' }}"
+          echo "## 🚴 ${MODE} Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ -f state.json ]; then
-            SYNCED_COUNT=$(jq '.synced_activities | length' state.json 2>/dev/null || echo "0")
+            SYNCED_COUNT=$(jq '.synced_ids | length' state.json 2>/dev/null || echo "0")
             echo "✅ **Total synced activities:** ${SYNCED_COUNT}" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
+          fi
 
-            if [ -f sync.log ]; then
-              echo "### Sync Log" >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              tail -20 sync.log >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-            fi
-          else
-            echo "ℹ️ No state file generated" >> $GITHUB_STEP_SUMMARY
+          if [ -d fit_downloads ]; then
+            FIT_COUNT=$(ls -1 fit_downloads/*.fit 2>/dev/null | wc -l)
+            echo "📁 **Downloaded FIT files:** ${FIT_COUNT}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f sync.log ]; then
+            echo "### Log" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -30 sync.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
           if [ "${{ steps.tokens.outputs.tokens_changed }}" == "true" ]; then
