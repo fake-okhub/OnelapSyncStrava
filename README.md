@@ -14,6 +14,7 @@
 - **原始 FIT 数据**：直接抓取最完整的 FIT 文件并上传，骑行细节一丁点都不丢失。
 - **省心的 Strava 授权**：支持 Token 自动刷新。配好以后，它就只是个安静的后台同步工具。
 - **灵活的操作方式**：不论是一键全自动同步，还是手动的环境检测，都能找对应的子命令。
+- **自动更新 Secrets**：Token 刷新后自动更新 GitHub Secrets，无需手动维护。
 
 ## 快速上手
 
@@ -22,7 +23,7 @@
 1. **先去 Strava 串个门**。在 [API 设置](https://www.strava.com/settings/api) 里创建一个应用，回调域名（Callback Domain）填 `localhost`，记下生成的 `Client ID` 和 `Secret`。
 2. **准备配置文件**。把项目根目录下的 `config.sample.json` 复制一份，改名为 `config.json`。
 3. **填入账号信息**。打开 `config.json`，填入你的顽鹿账号密码，以及刚才拿到的那两串 Strava 凭据。
-4. **过一遍授权**。终端运行 `./OnelapSyncStrava auth`。浏览器会自动跳出授权页面，你只需要点一下“确认授权”即可。
+4. **过一遍授权**。终端运行 `./OnelapSyncStrava auth`。浏览器会自动跳出授权页面，你只需要点一下"确认授权"即可。
 5. **起飞**。运行 `./OnelapSyncStrava` 开始同步。以后每次骑完跑一下它就行，甚至可以丢进后台定时任务彻底解放双手。
 
 ## 前置要求
@@ -71,7 +72,7 @@ go build -o OnelapSyncStrava main.go
 ```
 
 > **常见疑问：我都填了 ID 和 Secret，为什么还要跑 `auth` 命令？**
-> 简单来说，ID 和 Secret 是这个“软件”的身份证。而 `auth` 流程是你这位“用户”在亲自点头：我同意把数据授权给它。这步只需要走一次，之后程序拿到 `refresh_token` 就能自动“续命”了。
+> 简单来说，ID 和 Secret 是这个"软件"的身份证。而 `auth` 流程是你这位"用户"在亲自点头：我同意把数据授权给它。这步只需要走一次，之后程序拿到 `refresh_token` 就能自动"续命"了。
 
 
 ## 使用教程
@@ -125,9 +126,98 @@ go build -o OnelapSyncStrava main.go
 ```
 展示当前的账户设定、Strava验证状态，以及历史成功同步的骑行活动条目数。
 
+---
+
+## 🆕 GitHub Actions 自动同步（新增功能）
+
+本项目已配置 GitHub Actions，可实现全自动定时同步，无需本地运行。
+
+### 功能特性
+
+| 功能 | 说明 |
+|------|------|
+| ⏰ 定时同步 | 每天北京时间凌晨 1 点自动运行 |
+| 🔄 手动触发 | 支持在 Actions 页面手动运行 |
+| 📥 批量下载 | 支持下载所有历史 FIT 文件 |
+| 🔑 自动更新 Token | Strava Token 刷新后自动更新 GitHub Secrets |
+
+### 配置步骤
+
+#### 1. Fork 或克隆仓库到你的 GitHub
+
+#### 2. 创建 GitHub Personal Access Token
+
+由于需要自动更新 Secrets，需要创建一个 PAT：
+
+1. 打开 https://github.com/settings/tokens/new
+2. 配置：
+   - Name: `OnelapSyncStrava`
+   - Expiration: `No expiration`
+   - Permissions: 勾选 **`repo`** (Full control of private repositories)
+3. 点击 "Generate token" 并复制
+
+#### 3. 配置 Repository Secrets
+
+进入 **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+
+| Secret Name | 说明 |
+|-------------|------|
+| `ONELAP_ACCOUNT` | 顽鹿账号 |
+| `ONELAP_PASSWORD` | 顽鹿密码 |
+| `STRAVA_CLIENT_ID` | Strava Client ID |
+| `STRAVA_CLIENT_SECRET` | Strava Client Secret |
+| `STRAVA_ACCESS_TOKEN` | Strava Access Token（首次授权后获取） |
+| `STRAVA_REFRESH_TOKEN` | Strava Refresh Token（首次授权后获取） |
+| `STRAVA_EXPIRES_AT` | Token 过期时间（首次设为 `0`） |
+| `GH_TOKEN` | 上一步创建的 GitHub PAT |
+
+#### 4. 首次授权
+
+如果 Strava Token 无效，需要本地运行一次授权：
+
+```bash
+go build -o OnelapSyncStrava main.go
+./OnelapSyncStrava auth
+```
+
+授权成功后，将 `config.json` 中的 Token 更新到 GitHub Secrets。
+
+#### 5. 测试运行
+
+进入 **Actions** → **Sync Onelap to Strava** → **Run workflow**
+
+### 运行模式
+
+| 模式 | 说明 |
+|------|------|
+| `sync` | 同步今天和昨天的骑行记录到 Strava（默认） |
+| `download-all` | 下载所有历史 FIT 文件（带限速保护） |
+
+---
+
+## 🆕 新增命令：download-all
+
+下载所有历史 FIT 文件，用于数据备份：
+
+```bash
+./OnelapSyncStrava download-all
+```
+
+### 安全限制
+
+| 限制 | 值 | 说明 |
+|------|-----|------|
+| 每次下载间隔 | 2 秒 | 避免请求过快 |
+| 每 10 个文件额外暂停 | 10 秒 | 批次休息 |
+| 断点续传 | ✅ | 已下载的文件会跳过 |
+
+下载的文件保存在 `fit_downloads/` 目录。
+
+---
+
 ## 自动后台运行
 
-建议配个定时任务实现“全自动骑完即同步”：
+建议配个定时任务实现"全自动骑完即同步"：
 - **Windows**: 丢进 **任务计划程序** 每天跑一两次（或者配合骑行时间）。
 - **Linux/macOS**: 配置 `crontab` 定时任务。
 
@@ -140,7 +230,7 @@ OnelapSyncStrava/
 ├── config.sample.json          # 模板配置文件
 ├── state.json                  # 已同步记录状态（自动生成）
 ├── Makefile                    # 快捷构建脚本
-├── .github/workflows/          # CI/CD 自动发布配置
+├── .github/workflows/          # GitHub Actions 自动同步配置
 ├── .agents/skills/sync_wizard/ # 针对 Agent 辅助工具的使用指南
 ├── internal/
 │   ├── config/                 # 负责读取配置和记录同步状态 
@@ -149,6 +239,25 @@ OnelapSyncStrava/
 ├── go.mod
 └── go.sum
 ```
+
+## 🆕 相对于原仓库的改动
+
+本仓库基于 [kermit-r-wood/OnelapSyncStrava](https://github.com/kermit-r-wood/OnelapSyncStrava) 进行了以下增强：
+
+### 1. Bug 修复
+
+- **修复 FIT 文件下载 404 问题**：原代码使用 `fileKey` 字段，但顽鹿 API 实际返回的是 `durl` 字段，已修正。
+
+### 2. 新增功能
+
+- **GitHub Actions 自动同步**：新增 `.github/workflows/sync.yml`，支持定时自动同步
+- **download-all 命令**：新增批量下载所有历史 FIT 文件功能，带限速保护
+- **自动更新 Secrets**：Token 刷新后自动更新 GitHub Secrets，无需手动维护
+
+### 3. 改进
+
+- **限速保护**：批量下载时添加请求间隔，避免 API 封禁
+- **断点续传**：已下载的文件自动跳过
 
 ## 许可证
 
