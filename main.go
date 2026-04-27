@@ -177,7 +177,7 @@ func runDownloadAll() {
 		delayBetweenDownloads = 2 * time.Second  // Delay between each download
 		delayBetweenBatches   = 10 * time.Second // Delay every 10 files
 		batchSize             = 10
-		maxDownloads          = 2 // Test mode: only download 2 files, set to 0 for unlimited
+		maxDownloads          = 0 // Set to 0 for unlimited downloads
 	)
 
 	onelapClient := onelap.NewClient()
