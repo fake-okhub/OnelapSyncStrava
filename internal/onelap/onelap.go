@@ -2,6 +2,7 @@ package onelap
 
 import (
 	"crypto/md5"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -15,14 +16,13 @@ import (
 const (
 	OnelapSecret    = "fe9f8382418fcdeb136461cac6acae7b"
 	LoginBaseURL    = "https://www.onelap.cn/api"
-	AnalysisBaseURL = "https://u.onelap.cn/analysis"
+	AnalysisBaseURL = "https://u.onelap.cn/api/otm/ride_record"
 )
 
 type Client struct {
 	restyClient *resty.Client
 	UID         string
-	XSRFToken   string
-	OToken      string
+	AuthToken   string
 }
 
 func NewClient() *Client {
@@ -60,7 +60,6 @@ func (c *Client) Login(account, password string) error {
 	nonce := randomHex(16)
 	passwordMd5 := md5Hex(password)
 
-	// Signature calculation matching Onelap's verification
 	signStr := fmt.Sprintf("account=%s&nonce=%s&password=%s&timestamp=%s&key=%s", account, nonce, passwordMd5, timestamp, OnelapSecret)
 	sign := md5Hex(signStr)
 
@@ -82,15 +81,12 @@ func (c *Client) Login(account, password string) error {
 		return fmt.Errorf("login failed with status: %s, body: %s", resp.Status(), resp.String())
 	}
 
-	// Extract cookies and tokens from response
-	// The response structure usually contains userinfo and token
-	// data[0].userinfo.uid, data[0].token, data[0].refresh_token
 	type LoginResponse struct {
 		Data []struct {
 			Token        string `json:"token"`
 			RefreshToken string `json:"refresh_token"`
 			UserInfo     struct {
-				UID json.Number `json:"uid"` // Use json.Number to avoid scientific notation
+				UID json.Number `json:"uid"`
 			} `json:"userinfo"`
 		} `json:"data"`
 	}
@@ -105,8 +101,7 @@ func (c *Client) Login(account, password string) error {
 	}
 
 	c.UID = loginData.Data[0].UserInfo.UID.String()
-	c.XSRFToken = loginData.Data[0].Token
-	c.OToken = loginData.Data[0].RefreshToken
+	c.AuthToken = loginData.Data[0].Token
 
 	return nil
 }
@@ -116,38 +111,29 @@ func (c *Client) Check(account, password string) error {
 }
 
 type Activity struct {
-	ExternalID string      `json:"_id"` // Unique activity ID from Onelap
-	UserID     json.Number `json:"id"`  // User ID
-	FitURL     string      `json:"fitUrl"` // FIT file name (e.g., MATCH_120031-2026-04-26-15-39-00-log.st)
-	StartTime  string      `json:"date"`   // Use 'date' field from API
-	DURL       string      `json:"durl"`   // Download URL (base64 encoded, relative path)
+	ExternalID string `json:"id"`              // Activity ID (new API uses "id" instead of "_id")
+	Name       string `json:"name"`            // Activity name
+	FitURL     string `json:"fitUrl,omitempty"` // FIT file name (from detail API, not in list)
+	StartTime  string `json:"start_riding_time"` // Start time (new API uses "start_riding_time")
 }
 
-// GetDownloadURL returns the URL to download the FIT file
-func (a *Activity) GetDownloadURL() string {
-	// durl is already the correct relative path (base64 encoded)
-	if a.DURL != "" {
-		if len(a.DURL) > 0 && a.DURL[0] == '/' {
-			return "https://u.onelap.cn" + a.DURL
-		}
-		return "https://u.onelap.cn/analysis/download/" + a.DURL
-	}
-	return ""
-}
-
+// GetActivities fetches all activities from Onelap
 func (c *Client) GetActivities() ([]Activity, error) {
 	resp, err := c.restyClient.R().
-		SetCookie(&http.Cookie{Name: "ouid", Value: c.UID}).
-		SetCookie(&http.Cookie{Name: "XSRF-TOKEN", Value: c.XSRFToken}).
-		SetCookie(&http.Cookie{Name: "OTOKEN", Value: c.OToken}).
-		Get(AnalysisBaseURL + "/list")
+		SetHeader("Content-Type", "application/json").
+		SetHeader("Authorization", "Bearer "+c.AuthToken).
+		SetBody(`{}`).
+		Post(AnalysisBaseURL + "/list")
 
 	if err != nil {
 		return nil, fmt.Errorf("get activity list failed: %w", err)
 	}
 
 	type ListResponse struct {
-		Data []Activity `json:"data"`
+		Code int    `json:"code"`
+		Data struct {
+			List []Activity `json:"list"`
+		} `json:"data"`
 	}
 
 	var dataResponse ListResponse
@@ -155,7 +141,11 @@ func (c *Client) GetActivities() ([]Activity, error) {
 		return nil, fmt.Errorf("failed to unmarshal activity list: %w", err)
 	}
 
-	return dataResponse.Data, nil
+	if dataResponse.Code != 200 {
+		return nil, fmt.Errorf("activity list API returned code %d", dataResponse.Code)
+	}
+
+	return dataResponse.Data.List, nil
 }
 
 func (c *Client) GetTodayActivities() ([]Activity, error) {
@@ -164,17 +154,14 @@ func (c *Client) GetTodayActivities() ([]Activity, error) {
 		return nil, err
 	}
 
-	// We'll check for activities in the last 24 hours to be more robust 
-	// against timezone differences, or just use the date field.
 	today := time.Now().Format("2006-01-02")
 	yesterday := time.Now().Add(-24 * time.Hour).Format("2006-01-02")
-	
+
 	var todayActivities []Activity
 	for _, act := range all {
-		// Onelap 'date' format is usually "YYYY-MM-DD HH:MM"
 		if len(act.StartTime) >= 10 {
 			dateStr := act.StartTime[:10]
-			if dateStr == today || dateStr == yesterday { // Include yesterday to be safe with sync time
+			if dateStr == today || dateStr == yesterday {
 				todayActivities = append(todayActivities, act)
 			}
 		}
@@ -183,44 +170,61 @@ func (c *Client) GetTodayActivities() ([]Activity, error) {
 	return todayActivities, nil
 }
 
-func (c *Client) DownloadFIT(durl, destPath string) error {
-	// Handle relative URLs - prepend base URL if needed
-	fullURL := durl
-	if len(durl) > 0 && durl[0] == '/' {
-		// Relative URL, prepend the analysis base URL
-		fullURL = AnalysisBaseURL + durl
-	}
-
+// getActivityDetail fetches the detail of an activity (including fitUrl)
+func (c *Client) getActivityDetail(activityID string) (string, error) {
 	resp, err := c.restyClient.R().
-		SetOutput(destPath).
-		SetCookie(&http.Cookie{Name: "ouid", Value: c.UID}).
-		SetCookie(&http.Cookie{Name: "XSRF-TOKEN", Value: c.XSRFToken}).
-		SetCookie(&http.Cookie{Name: "OTOKEN", Value: c.OToken}).
-		Get(fullURL)
+		SetHeader("Authorization", "Bearer "+c.AuthToken).
+		Get(AnalysisBaseURL + "/analysis/" + activityID)
 
 	if err != nil {
-		return fmt.Errorf("failed to download FIT file: %w", err)
+		return "", fmt.Errorf("get activity detail failed: %w", err)
 	}
 
-	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("download failed with status: %s", resp.Status())
+	type DetailResponse struct {
+		Code int `json:"code"`
+		Data struct {
+			RidingRecord struct {
+				FitURL string `json:"fitUrl"`
+			} `json:"ridingRecord"`
+		} `json:"data"`
 	}
 
-	return nil
+	var detailResponse DetailResponse
+	if err := json.Unmarshal(resp.Body(), &detailResponse); err != nil {
+		return "", fmt.Errorf("failed to unmarshal activity detail: %w", err)
+	}
+
+	if detailResponse.Code != 200 {
+		return "", fmt.Errorf("activity detail API returned code %d", detailResponse.Code)
+	}
+
+	return detailResponse.Data.RidingRecord.FitURL, nil
 }
 
-// DownloadActivityFIT downloads the FIT file for an activity using its FileKey or DURL
+// DownloadActivityFIT downloads the FIT file for an activity
 func (c *Client) DownloadActivityFIT(act *Activity, destPath string) error {
-	downloadURL := act.GetDownloadURL()
-	if downloadURL == "" {
-		return fmt.Errorf("no download URL available for activity %s", act.ExternalID)
+	// If fitUrl is not in the list response, fetch it from the detail API
+	fitURL := act.FitURL
+	if fitURL == "" {
+		fetchedFitURL, err := c.getActivityDetail(act.ExternalID)
+		if err != nil {
+			return fmt.Errorf("failed to get activity detail for %s: %w", act.ExternalID, err)
+		}
+		fitURL = fetchedFitURL
 	}
+
+	if fitURL == "" {
+		return fmt.Errorf("no fitUrl available for activity %s", act.ExternalID)
+	}
+
+	// Base64 encode the fitUrl (matching Onelap's JS: unescape(encodeURIComponent(t)) then btoa)
+	encoded := base64.StdEncoding.EncodeToString([]byte(fitURL))
+
+	downloadURL := AnalysisBaseURL + "/analysis/fit_content/" + encoded
 
 	resp, err := c.restyClient.R().
 		SetOutput(destPath).
-		SetCookie(&http.Cookie{Name: "ouid", Value: c.UID}).
-		SetCookie(&http.Cookie{Name: "XSRF-TOKEN", Value: c.XSRFToken}).
-		SetCookie(&http.Cookie{Name: "OTOKEN", Value: c.OToken}).
+		SetHeader("Authorization", "Bearer "+c.AuthToken).
 		Get(downloadURL)
 
 	if err != nil {

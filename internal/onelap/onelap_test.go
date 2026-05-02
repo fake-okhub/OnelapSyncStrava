@@ -37,14 +37,11 @@ func TestLogin(t *testing.T) {
 	if client.UID == "" || client.UID == "<nil>" {
 		t.Fatal("Login succeeded but UID is empty")
 	}
-	if client.XSRFToken == "" {
-		t.Fatal("Login succeeded but XSRFToken is empty")
-	}
-	if client.OToken == "" {
-		t.Fatal("Login succeeded but OToken is empty")
+	if client.AuthToken == "" {
+		t.Fatal("Login succeeded but AuthToken is empty")
 	}
 
-	t.Logf("Login successful: UID=%s, Token=%s...", client.UID, client.XSRFToken[:16])
+	t.Logf("Login successful: UID=%s, Token=%s...", client.UID, client.AuthToken[:16])
 }
 
 // TestGetActivities verifies that we can fetch the activity list after login.
@@ -62,13 +59,12 @@ func TestGetActivities(t *testing.T) {
 	}
 
 	t.Logf("Total activities: %d", len(activities))
-	// Print first 5 activities for inspection
 	for i, act := range activities {
 		if i >= 5 {
 			break
 		}
-		t.Logf("  [%d] ExternalID=%s, UserID=%s, FileKey=%s, StartTime=%s, DURL=%s",
-			i, act.ExternalID, act.UserID, act.FileKey, act.StartTime, act.DURL)
+		t.Logf("  [%d] ExternalID=%s, Name=%s, StartTime=%s",
+			i, act.ExternalID, act.Name, act.StartTime)
 	}
 }
 
@@ -88,7 +84,7 @@ func TestGetTodayActivities(t *testing.T) {
 
 	t.Logf("Today's activities: %d", len(activities))
 	for i, act := range activities {
-		t.Logf("  [%d] ExternalID=%s, UserID=%s, FileKey=%s, StartTime=%s", i, act.ExternalID, act.UserID, act.FileKey, act.StartTime)
+		t.Logf("  [%d] ExternalID=%s, Name=%s, StartTime=%s", i, act.ExternalID, act.Name, act.StartTime)
 	}
 }
 
@@ -111,16 +107,12 @@ func TestDownloadFIT(t *testing.T) {
 	}
 
 	act := activities[0]
-	if act.DURL == "" {
-		t.Skip("First activity has no download URL")
-	}
-
 	tmpDir := t.TempDir()
 	destPath := filepath.Join(tmpDir, fmt.Sprintf("%s.fit", act.ExternalID))
 
-	t.Logf("Downloading FIT from: %s", act.DURL)
-	if err := client.DownloadFIT(act.DURL, destPath); err != nil {
-		t.Fatalf("DownloadFIT failed: %v", err)
+	t.Logf("Downloading FIT for activity: %s (%s)", act.ExternalID, act.Name)
+	if err := client.DownloadActivityFIT(&act, destPath); err != nil {
+		t.Fatalf("DownloadActivityFIT failed: %v", err)
 	}
 
 	info, err := os.Stat(destPath)
